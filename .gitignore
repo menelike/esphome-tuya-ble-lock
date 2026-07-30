@@ -1,0 +1,33 @@
+# ---- macOS ----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+.AppleDouble
+.LSOverride
+Icon?
+
+# ---- ESPHome ----
+.esphome/
+secrets.yaml
+*.bin
+
+# ---- Python (codegen) ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- Editors / IDE ----
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---- Misc ----
+*.log
+tests/run

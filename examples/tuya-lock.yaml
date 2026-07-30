@@ -1,0 +1,72 @@
+# Example ESPHome config for a Tuya ZX-5330/-5377 BLE smart lock.
+# Replace ALL <PLACEHOLDER> values with your own (see README: "Getting your credentials").
+# Flash this onto an ESP32 (any BLE-capable ESP32: classic / C3 / S3 / C6) placed
+# within Bluetooth range of the lock.
+
+esphome:
+  name: tuya-lock
+  friendly_name: Tuya Lock
+
+# Pull the tuya_lock component straight from GitHub — no local files needed.
+external_components:
+  - source:
+      type: git
+      url: https://github.com/menelike/esphome-tuya-ble-lock
+    components: [tuya_lock]
+    # Recommended: pin a released version so a future update can't break your build:
+    # ref: v1.0.0
+  # Alternatively, if you cloned the repo next to your config, use a local source:
+  # - source: { type: local, path: esphome-tuya-ble-lock/components }
+  #   components: [tuya_lock]
+
+esp32:
+  variant: esp32c3          # or: board: esp32dev  (classic ESP32), etc.
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: "<YOUR_API_ENCRYPTION_KEY>"
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Tuya Lock Fallback"
+    password: "<AP_PASSWORD>"
+
+captive_portal:
+
+esp32_ble_tracker:
+
+# ---- one ble_client + one tuya_lock + buttons PER lock ----
+ble_client:
+  - mac_address: <LOCK_MAC>            # e.g. AA:BB:CC:11:22:33
+    id: my_lock_client
+
+tuya_lock:
+  - id: my_lock
+    ble_client_id: my_lock_client
+    local_key: "<LOCAL_KEY_V2>"        # the v2.0 local_key — see README
+    uuid: "<UUID>"
+    device_id: "<DEVICE_ID>"
+    passcode: "<PASSCODE>"             # numeric door passcode — see README
+
+button:
+  - platform: tuya_lock
+    action: unlock
+    tuya_lock_id: my_lock
+    name: "Front Door Unlock"
+  - platform: tuya_lock
+    action: lock
+    tuya_lock_id: my_lock
+    name: "Front Door Lock"
+  - platform: tuya_lock
+    action: status
+    tuya_lock_id: my_lock
+    name: "Front Door Status"
