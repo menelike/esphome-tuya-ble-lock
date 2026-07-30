@@ -63,17 +63,24 @@ just add another `ble_client` + `tuya_lock` + buttons block per lock (see
 [Multiple locks](#multiple-locks) and [`examples/multi-lock.yaml`](examples/multi-lock.yaml)).
 
 The component is pulled straight from GitHub — you don't need to copy any files locally.
-To protect against a future update changing behaviour, pin a released version with `ref:`.
+Pinning a released version with `ref:` is recommended so a future update can't change behaviour
+under you.
 
 ```yaml
 external_components:
   - source:
       type: git
       url: https://github.com/menelike/esphome-tuya-ble-lock
+      ref: v1.1.0        # pin to a release for a reproducible build (omit for latest)
     components: [tuya_lock]
-    # ref: v1.0.0   # optional: pin to a release for a reproducible build
 
+# Listen almost continuously so the sleepy lock is discovered fast — see "Reliable first
+# connect" below. Without this, the first connect can be slow or time out.
 esp32_ble_tracker:
+  scan_parameters:
+    interval: 320ms
+    window: 300ms
+    active: true
 
 ble_client:
   - mac_address: <LOCK_MAC>
@@ -101,6 +108,10 @@ button:
     tuya_lock_id: my_lock
     name: "Front Door Status"
 ```
+
+This is the minimal wiring. For the **battery / last-status entities** and the full
+`wifi:` / `api:` / `ota:` scaffolding, copy [`examples/tuya-lock.yaml`](examples/tuya-lock.yaml) —
+the complete, kept-current reference config.
 
 ## In Home Assistant
 

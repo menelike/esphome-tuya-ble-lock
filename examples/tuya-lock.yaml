@@ -12,9 +12,8 @@ external_components:
   - source:
       type: git
       url: https://github.com/menelike/esphome-tuya-ble-lock
+      ref: v1.1.0        # pinned release for a reproducible build (remove for latest)
     components: [tuya_lock]
-    # Recommended: pin a released version so a future update can't break your build:
-    # ref: v1.0.0
   # Alternatively, if you cloned the repo next to your config, use a local source:
   # - source: { type: local, path: esphome-tuya-ble-lock/components }
   #   components: [tuya_lock]
