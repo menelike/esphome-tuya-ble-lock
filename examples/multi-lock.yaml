@@ -30,13 +30,17 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  ap:
-    ssid: "Tuya Locks Fallback"
-    password: "<AP_PASSWORD>"
-
-captive_portal:
+  # NOTE: intentionally NO fallback `ap:` / `captive_portal:` here — see the single-lock
+  # example and README ("Security") for why that matters for a device that can open your doors.
 
 esp32_ble_tracker:
+  # Locks are sleepy peripherals that advertise infrequently; listen almost continuously so
+  # each is discovered fast (see README "Reliable first connect"). This matters MORE with
+  # multiple locks, since each press connects cold.
+  scan_parameters:
+    interval: 320ms
+    window: 300ms
+    active: true
 
 ble_client:
   - mac_address: <FRONT_MAC>
@@ -72,6 +76,10 @@ button:
     tuya_lock_id: front
     name: "Front Door Lock"
   - platform: tuya_lock
+    action: status
+    tuya_lock_id: front
+    name: "Front Door Status"
+  - platform: tuya_lock
     action: unlock
     tuya_lock_id: back
     name: "Back Door Unlock"
@@ -79,3 +87,28 @@ button:
     action: lock
     tuya_lock_id: back
     name: "Back Door Lock"
+  - platform: tuya_lock
+    action: status
+    tuya_lock_id: back
+    name: "Back Door Status"
+
+# Optional per-lock battery + last-status entities (see the single-lock example / README).
+sensor:
+  - platform: tuya_lock
+    tuya_lock_id: front
+    battery_level:
+      name: "Front Door Battery"
+  - platform: tuya_lock
+    tuya_lock_id: back
+    battery_level:
+      name: "Back Door Battery"
+
+text_sensor:
+  - platform: tuya_lock
+    tuya_lock_id: front
+    last_status:
+      name: "Front Door Last Status"
+  - platform: tuya_lock
+    tuya_lock_id: back
+    last_status:
+      name: "Back Door Last Status"

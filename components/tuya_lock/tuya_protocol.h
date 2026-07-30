@@ -82,6 +82,18 @@ std::vector<uint8_t> build_unlock_dp(const std::string &passcode, uint32_t times
 // Lock DP46 bool true: 2e 01 01 01.
 std::vector<uint8_t> build_lock_dp();
 
+// ---- status parsing ----
+// A single decoded data point from a status/report frame.
+//   [id:1][type:1][len:1][value] repeated.  type: 0=raw 1=bool 2=int 4=enum 5=bitmap
+struct DataPoint {
+  uint8_t id{0};
+  uint8_t type{0};
+  std::vector<uint8_t> value;       // raw bytes
+  uint32_t as_int() const;          // big-endian integer view (bool/int/enum)
+};
+// Decode all DPs in a report body (safe on truncated input — stops at the last full DP).
+std::vector<DataPoint> parse_datapoints(const std::vector<uint8_t> &data);
+
 }  // namespace proto
 }  // namespace tuya_lock
 }  // namespace esphome

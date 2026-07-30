@@ -13,6 +13,16 @@ void TuyaLock::setup() {
   login_key_ok_ = proto::derive_login_key(local_key_, login_key_);
   if (!login_key_ok_)
     ESP_LOGE(TAG, "local_key too short (need >= 6 chars) — lock will not work");
+
+  if (status_on_boot_ && login_key_ok_) {
+    // Wait for the BLE stack + tracker to come up before the first connect (an immediate
+    // attempt at boot just times out). This is a normal status request, so it flows through
+    // request_()/in_flight_ like any press — it warms discovery and fills the entities.
+    this->set_timeout("boot_status", 8000, [this]() {
+      ESP_LOGI(TAG, "status-on-boot: reading lock");
+      this->status();
+    });
+  }
 }
 
 void TuyaLock::dump_config() {
@@ -41,36 +51,81 @@ void TuyaLock::request_(TLAction a) {
   ESP_LOGI(TAG, "action requested: %d", (int) a);
   pending_ = a;
   in_flight_ = true;
+  retried_ = false;
+  start_attempt_();
+}
+
+void TuyaLock::start_attempt_() {
   reset_session_();
-  // fail-safe: if the handshake never completes, recover instead of hanging forever
-  this->set_timeout("handshake", TL_HANDSHAKE_TIMEOUT_MS,
-                    [this]() { this->finish_(false, "handshake timeout"); });
+  // DISCOVERY phase: we have NOT connected yet, so no action byte can have been sent. If this
+  // expires it is safe to tear down and retry once (a cold BLE scan just missed the lock's
+  // advertisement). The retry is disarmed the moment the link opens (see ESP_GATTC_OPEN_EVT),
+  // after which a stall becomes a hard failure — never a re-send of unlock.
+  this->set_timeout("discover", TL_DISCOVERY_TIMEOUT_MS, [this]() {
+    if (!retried_) {
+      retried_ = true;
+      ESP_LOGW(TAG, "no connection yet — retrying discovery once");
+      this->parent()->set_enabled(false);  // tear the (never-opened) attempt down...
+      this->set_timeout("reattempt", 1000, [this]() { this->start_attempt_(); });  // ...then retry
+    } else {
+      this->finish_(false, "lock not found (no advertisement)");
+    }
+  });
   this->parent()->set_enabled(true);  // framework connects; flow continues in the event handler
 }
 
 void TuyaLock::finish_(bool success, const char *reason) {
+  this->cancel_timeout("discover");
   this->cancel_timeout("handshake");
-  if (success) {
-    ESP_LOGI(TAG, "done: %s", reason);
-    this->success_trigger_.trigger();
-  } else {
-    ESP_LOGW(TAG, "failed: %s", reason);
-    this->error_trigger_.trigger();
-  }
+  this->cancel_timeout("status_settle");
+  this->cancel_timeout("reattempt");
+
+  // Capture the outcome, then fully reset state BEFORE firing the trigger. The trigger runs an
+  // Home Assistant automation synchronously; if it ever calls back into us (e.g. presses another action),
+  // the component must already be idle (in_flight_ == false) so that request isn't rejected or
+  // interleaved with a half-reset state.
+  bool ok = success;
+  std::string payload =
+      (ok && !status_result_.empty()) ? status_result_ : std::string(reason);
+
   pending_ = TL_NONE;
   in_flight_ = false;
+  retried_ = false;
   action_done_msg_ = nullptr;
+  status_result_.clear();
+  status_dump_.clear();
+  have_battery_ = false;
+  battery_pct_ = 0;
   reset_session_();
   // disconnect (non-blocking) to free the radio
   this->set_timeout("disconnect", 200, [this]() { this->parent()->set_enabled(false); });
+
+  if (ok) {
+    ESP_LOGI(TAG, "done: %s", payload.c_str());
+    this->success_trigger_.trigger(payload);
+  } else {
+    ESP_LOGW(TAG, "failed: %s", payload.c_str());
+    this->error_trigger_.trigger(payload);
+  }
 }
 
 void TuyaLock::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                                    esp_ble_gattc_cb_param_t *param) {
   switch (event) {
     case ESP_GATTC_OPEN_EVT:
-      if (param->open.status == ESP_GATT_OK)
+      // Only react if WE initiated this connection for a pending action. The BLE stack can emit
+      // stray open/close events at boot or during idle churn; without this guard we'd arm a
+      // handshake timeout with no request behind it and report a bogus "handshake timeout".
+      if (param->open.status == ESP_GATT_OK && in_flight_) {
         ESP_LOGD(TAG, "connected");
+        // Link is open: discovery succeeded. Disarm the retry-capable discovery timeout and
+        // switch to the handshake timeout, which FAILS (never retries) — from here on we might
+        // already have sent the action, so a re-send is not safe.
+        this->cancel_timeout("discover");
+        retried_ = true;  // hard-disable any further retry for this request
+        this->set_timeout("handshake", TL_HANDSHAKE_TIMEOUT_MS,
+                          [this]() { this->finish_(false, "handshake timeout"); });
+      }
       break;
 
     case ESP_GATTC_DISCONNECT_EVT:
@@ -80,6 +135,8 @@ void TuyaLock::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
       break;
 
     case ESP_GATTC_SEARCH_CMPL_EVT: {
+      if (!in_flight_)
+        break;  // stray boot/idle event — not for an action we started
       // Resolve write/notify chars by 16-bit UUID across ALL services (they live under a
       // vendor service, not a standard one).
       write_handle_ = 0;
@@ -121,6 +178,8 @@ void TuyaLock::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
     }
 
     case ESP_GATTC_REG_FOR_NOTIFY_EVT:
+      if (!in_flight_)
+        break;  // stray event — only start the handshake for an action we initiated
       // notifications on -> start the handshake with an (empty) device-info request
       reasm_.reset();
       queue_message_(proto::SEC_LOGIN, proto::CODE_DEVICE_INFO, {});
@@ -219,7 +278,62 @@ void TuyaLock::handle_frame_(const std::vector<uint8_t> &frame) {
   } else if (d.code == proto::CODE_PAIR) {
     ESP_LOGD(TAG, "paired -> sending action");
     send_action_();
+  } else if (d.code == proto::CODE_DPS || d.code == 0x8001) {
+    // DP report from the lock (status reply, or spontaneous state update) -> publish
+    publish_status_(d.data);
   }
+}
+
+void TuyaLock::publish_status_(const std::vector<uint8_t> &dp_body) {
+  auto dps = proto::parse_datapoints(dp_body);
+  if (dps.empty())
+    return;
+  // The lock sends its status DPs across MULTIPLE frames (observed: DP40 door, then DP47 lock
+  // state, then DP8 battery — each in its own 0x8001 frame). Accumulate them here; a debounce
+  // timer fires finish_status_() once the frames stop arriving, so the summary + battery
+  // reflect the whole reply. Battery still publishes immediately (it's the reliable value).
+  for (auto &dp : dps) {
+    // Keep the full raw dump (all DP ids) for the debug log line and status_result_.
+    status_dump_ += " " + std::to_string(dp.id) + "=" + std::to_string(dp.as_int());
+    if (dp.id == 8) {  // residual_electricity (battery %) — the one reliable value
+      have_battery_ = true;
+      battery_pct_ = (int) dp.as_int();
+#ifdef USE_SENSOR
+      if (battery_sensor_ != nullptr)
+        battery_sensor_->publish_state((float) battery_pct_);
+#endif
+    }
+  }
+  ESP_LOGI(TAG, "status frame (DPid=value):%s", status_dump_.c_str());
+
+  // If a status read is in flight, defer completion until the frames settle (~600ms after the
+  // last one). Each new frame resets the timer. Spontaneous reports (no press) just update the
+  // entities above and don't finish anything.
+  if (in_flight_ && pending_ == TL_STATUS) {
+    this->set_timeout("status_settle", 600, [this]() { this->finish_status_(); });
+  }
+}
+
+void TuyaLock::finish_status_() {
+  if (!(in_flight_ && pending_ == TL_STATUS))
+    return;
+  // Summary shown in the text sensor, e.g. "battery 70% · @342s". We deliberately DON'T include
+  // the lock/door state DPs — on this device they report unreliably, so surfacing them would be
+  // misleading. Battery is the one value the lock reports dependably.
+  std::string summary = have_battery_ ? "battery " + std::to_string(battery_pct_) + "%" : "no data";
+  // Battery rarely changes between reads (holds at e.g. 70% for days), so two consecutive presses
+  // would publish the SAME string — and Home Assistant only records a logbook / activity row on a
+  // state CHANGE. Append the ESP uptime (seconds) so every read is a distinct state and thus a
+  // fresh row, giving visible "the press worked" confirmation. (Home Assistant stamps the real wall-clock
+  // time on the row itself; this suffix only guarantees uniqueness.)
+  summary += " \xC2\xB7 @" + std::to_string(millis() / 1000) + "s";
+#ifdef USE_TEXT_SENSOR
+  if (status_text_sensor_ != nullptr)
+    status_text_sensor_->publish_state(summary);
+#endif
+  ESP_LOGI(TAG, "status: %s", summary.c_str());
+  status_result_ = "status:" + status_dump_;
+  finish_(true, "status");
 }
 
 void TuyaLock::send_pair_() {
@@ -241,10 +355,13 @@ void TuyaLock::send_action_() {
     label = "lock sent";
   } else {  // TL_STATUS
     queue_message_(proto::SEC_SESSION, proto::CODE_DEVICE_STATUS, {});
-    label = "status requested";
+    // Status success is only meaningful once the lock's DP reply arrives (that reply carries
+    // the battery/DP values we forward). So DON'T finish on flush — publish_status_() will
+    // call finish_() when the DPs come back. The handshake timeout is the backstop if not.
+    return;
   }
-  // Only report success + tear down once the action bytes have actually left the queue.
-  // (If congestion paused the send, wait; the handshake timeout is the backstop.)
+  // unlock/lock: report success + tear down once the action bytes have actually left the
+  // queue. (If congestion paused the send, wait; the handshake timeout is the backstop.)
   action_done_msg_ = label;
   finish_when_flushed_();
 }

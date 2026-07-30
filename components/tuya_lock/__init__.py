@@ -17,6 +17,9 @@ CONF_DEVICE_ID = "device_id"
 CONF_PASSCODE = "passcode"
 CONF_ON_SUCCESS = "on_success"
 CONF_ON_ERROR = "on_error"
+CONF_STATUS_ON_BOOT = "status_on_boot"
+# shared by the sensor / text_sensor / button sub-platforms
+CONF_TUYA_LOCK_ID = "tuya_lock_id"
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -28,6 +31,7 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_DEVICE_ID): cv.All(cv.string, cv.Length(min=1)),
             # passcode is the lock's numeric code
             cv.Required(CONF_PASSCODE): cv.All(cv.string, cv.Length(min=1)),
+            cv.Optional(CONF_STATUS_ON_BOOT, default=True): cv.boolean,
             cv.Optional(CONF_ON_SUCCESS): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_ERROR): automation.validate_automation(single=True),
         }
@@ -45,12 +49,17 @@ async def to_code(config):
     cg.add(var.set_uuid(config[CONF_UUID]))
     cg.add(var.set_device_id(config[CONF_DEVICE_ID]))
     cg.add(var.set_passcode(config[CONF_PASSCODE]))
+    cg.add(var.set_status_on_boot(config[CONF_STATUS_ON_BOOT]))
 
     if CONF_ON_SUCCESS in config:
         await automation.build_automation(
-            var.get_success_trigger(), [], config[CONF_ON_SUCCESS]
+            var.get_success_trigger(),
+            [(cg.std_string, "x")],
+            config[CONF_ON_SUCCESS],
         )
     if CONF_ON_ERROR in config:
         await automation.build_automation(
-            var.get_error_trigger(), [], config[CONF_ON_ERROR]
+            var.get_error_trigger(),
+            [(cg.std_string, "x")],
+            config[CONF_ON_ERROR],
         )

@@ -36,13 +36,21 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  ap:
-    ssid: "Tuya Lock Fallback"
-    password: "<AP_PASSWORD>"
-
-captive_portal:
+  # SECURITY: no fallback `ap:` and no `captive_portal:` below (see README "Security").
+  # This device can open your doors — you do NOT want it exposing an open/soft-AP config
+  # portal if it can't reach WiFi (e.g. someone cuts your router's power). Leaving these out
+  # means a WiFi outage just makes the lock buttons temporarily unavailable, which is the
+  # safe failure mode. Re-flash over USB if you ever need to change WiFi.
 
 esp32_ble_tracker:
+  scan_parameters:
+    # The lock is a sleepy, battery-powered peripheral that advertises infrequently. The
+    # tracker default listens only 30ms out of every 320ms (~9% of the time), so it can miss
+    # the lock's advertisement for several seconds — making the first on-demand connect time
+    # out. Listen almost continuously so the advertisement is caught right away.
+    interval: 320ms
+    window: 300ms
+    active: true
 
 # ---- one ble_client + one tuya_lock + buttons PER lock ----
 ble_client:
@@ -56,6 +64,10 @@ tuya_lock:
     uuid: "<UUID>"
     device_id: "<DEVICE_ID>"
     passcode: "<PASSCODE>"             # numeric door passcode — see README
+    # status_on_boot defaults to true: a few seconds after boot the component reads status once,
+    # which warms the BLE path (so your first button press connects fast) and fills the
+    # battery/last-status entities. Uncomment to disable and go strictly on-demand:
+    # status_on_boot: false
 
 button:
   - platform: tuya_lock
@@ -69,4 +81,25 @@ button:
   - platform: tuya_lock
     action: status
     tuya_lock_id: my_lock
-    name: "Front Door Status"
+    name: "Front Door Status"   # press to refresh battery + get a "last status" row
+
+# Optional battery sensor — updates on each status read (and whenever the lock
+# reports its battery). If your device already has a `sensor:` block, add this entry
+# INTO that block rather than declaring `sensor:` twice (YAML forbids duplicate keys).
+sensor:
+  - platform: tuya_lock
+    tuya_lock_id: my_lock
+    battery_level:
+      name: "Front Door Battery"
+
+# Optional "last status" text sensor — a readable summary published on each status read,
+# e.g. "battery 70% · @342s" (the @Ns suffix is the ESP uptime, added so the value differs
+# on every press). Because its state changes each press, it gives you a
+# visible confirmation line in Home Assistant's logbook / device activity that the lock
+# was reached (the battery % alone only changes when the level actually changes).
+# Same rule as above: if you already have a `text_sensor:` block, merge this entry in.
+text_sensor:
+  - platform: tuya_lock
+    tuya_lock_id: my_lock
+    last_status:
+      name: "Front Door Last Status"

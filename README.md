@@ -10,14 +10,15 @@ No cloud. No phone. No Tuya gateway.
 
 ## Scope
 
-The goal of this project is — and always will be — **only lock and unlock** (plus a basic
-status read). In particular **local unlock**, which was previously **not possible** for these
-Tuya BLE locks: the cloud API deliberately doesn't expose remote unlock, HA Bluetooth proxies
-can't hold the connection, and existing integrations only did lock/status. This component's
-whole reason for existing is to make **local, cloud-free unlocking** work.
+The goal of this project is — and always will be — **only lock and unlock** (plus a status
+read that surfaces **battery %** and a **last-status** summary). In particular **local unlock**,
+which was previously **not possible** for these Tuya BLE locks: the cloud API deliberately
+doesn't expose remote unlock, Home Assistant Bluetooth proxies can't hold the connection, and existing
+integrations only did lock/status. This component's whole reason for existing is to make
+**local, cloud-free unlocking** work.
 
 It intentionally does **not** aim to expose the lock's other features (fingerprints, PIN
-management, logs, battery, etc.) — just reliable lock/unlock.
+management, access logs, etc.) — just reliable lock/unlock plus battery.
 
 ## Why on-device (and not a Bluetooth proxy)
 
@@ -28,6 +29,11 @@ This component sidesteps that entirely: it does the whole exchange as a **brief 
 ## Supported hardware
 
 - **The lock:** Tuya **ZX-5330 / ZX-5377** (`jtmspro`). Other Tuya BLE locks use the same crypto but may differ in DP mapping / characteristics — not supported/tested here.
+
+  **Specifically tested with** the lock sold in Germany by Pearl as
+  [GRA-15377 / **model TSZ-90**](https://www.pearl.de/a-GRA15377-3110.shtml) (purchased July 2025).
+  These generic Tuya locks are rebadged under many names; if yours matches the `jtmspro` category
+  and the DP codes in the [status table](#why-only-battery-observed-data-points), it should work.
 - **The ESP:** any **BLE-capable ESP32** — classic ESP32, C3, S3, C6. (NOT ESP8266/ESP-12E — no Bluetooth. NOT ESP32-S2 — no Bluetooth.) Place it **within BLE range of the lock** (same room / a few metres). A Shelly Plus 1/Pro flashed with ESPHome works well if it's already near the door.
 
   **Tested on:**
@@ -114,7 +120,7 @@ You can:
 - Optionally react to results via the `on_success` / `on_error` triggers (see
   [Result feedback](#result-feedback-optional)).
 
-With **multiple locks**, HA still sees a single ESPHome **device** (the one ESP32), and every
+With **multiple locks**, Home Assistant still sees a single ESPHome **device** (the one ESP32), and every
 button from every lock appears as its own entity under it — e.g. `button.front_door_unlock`,
 `button.back_door_unlock`, etc. They're distinguished by the `name:` you give each button, so
 prefix them per lock (e.g. "Front Door …", "Back Door …").
@@ -124,7 +130,104 @@ encrypted handshake, sends the unlock, and disconnects — all on-device, typica
 of seconds. There is no `lock` *entity* (with a lock/unlock toggle) — this component is
 deliberately button-based (fire an action), matching its "just lock/unlock" scope. If you want
 a lock entity, you can build a [template lock](https://www.home-assistant.io/integrations/lock.template/)
-in HA that calls these buttons.
+in Home Assistant that calls these buttons.
+
+### Optional entities: battery + last status
+
+Pressing **Status** reads the lock's data points. You can surface two of them as entities:
+
+- **Battery** (`sensor`, `battery_level:`) — the lock's remaining charge, e.g. `70 %`. Updates
+  on each status read and whenever the lock spontaneously reports it.
+- **Last status** (`text_sensor`, `last_status:`) — a summary published on **every** status
+  read, e.g. `battery 70% · @342s`. The `@Ns` suffix is the ESP's uptime in seconds; it's there
+  so the value **differs on every press** — Home Assistant only records a logbook / activity row
+  on a state *change*, and the battery % holds steady for days. So this gives you a reliable
+  "the press worked" row each time (Home Assistant stamps the real time on the row itself). Only battery is
+  surfaced — the lock/door-state DPs report unreliably on this device, so they're intentionally
+  left out of the summary to avoid showing misleading values.
+
+```yaml
+sensor:
+  - platform: tuya_lock
+    tuya_lock_id: my_lock
+    battery_level:
+      name: "Front Door Battery"
+
+text_sensor:
+  - platform: tuya_lock
+    tuya_lock_id: my_lock
+    last_status:
+      name: "Front Door Last Status"
+```
+
+> If your device config already has a `sensor:` or `text_sensor:` block, **merge** these
+> entries into the existing block — YAML forbids declaring the same top-level key twice.
+
+#### Why only battery? (observed data points)
+
+A status read returns several Tuya **data points (DPs)**. On the tested ZX-5330 these were the
+only ones that ever came back, and the full raw set is always logged (e.g.
+`status frame (DPid=value): 40=0 47=1 8=70`) so you can inspect your own device:
+
+| DP | Tuya name              | Observed        | Exposed?                                    |
+|----|------------------------|-----------------|---------------------------------------------|
+| 8  | `residual_electricity` | `70` (battery %)| ✅ **yes** — the one value reported reliably |
+| 47 | `lock_motor_state`     | `1`             | ❌ no — did not track real lock/unlock state |
+| 40 | `unlock_door` / door   | `0`             | ❌ no — did not track real door open/closed  |
+
+DP47 and DP40 **looked like** lock/door state, but in testing they were effectively **dead** —
+they didn't change when the door was actually locked/unlocked or opened/closed, so exposing them
+as entities would show misleading values. They're intentionally left out. If your device reports
+them meaningfully, you'll see them change in the `status frame` log line and can open an issue.
+
+### Reliable first connect (scan window)
+
+The lock is a **sleepy, battery-powered peripheral**: it advertises infrequently to save power.
+The ESP32 can only connect when its BLE scanner happens to catch one of those advertisements —
+and the `esp32_ble_tracker` default listens only **30 ms out of every 320 ms** (~9% of the time).
+So the **first** on-demand connect can take several seconds, or time out, simply because the
+scanner kept missing the advertisement. (The component already retries once automatically as a
+backstop, but the real fix is to scan more.)
+
+Widen the scan window so the ESP is listening almost continuously:
+
+```yaml
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 320ms
+    window: 300ms      # ~94% listening instead of ~9% — catches the lock right away
+    active: true
+```
+
+This makes discovery near-instant. On a mains-powered ESP (like a Shelly) the extra radio time
+is negligible; if you ever see WiFi coexistence issues, dial `window` back toward ~150 ms.
+
+### Warm-up on boot (`status_on_boot`)
+
+By default the component does **one status read a few seconds after boot**.
+
+**Why this matters — it absorbs the first-connect penalty.** Every action connects *cold* (the
+component never holds an open connection), and the **very first** connect after boot is the worst
+case: the BLE stack is freshly up and the lock — a sleepy peripheral — may be mid–quiet-gap, so
+that first attempt is the one most likely to miss the advertisement and need its automatic retry
+(you'll see `no connection yet — retrying discovery once` in the log). `status_on_boot`
+deliberately **spends that costly first attempt at boot, when nobody is waiting.** By the time
+you press a button at the door, the path is already warm and the lock was recently discovered, so
+*your* press connects on the first try. With it off, that same penalty doesn't disappear — it
+just moves to whenever you first press, i.e. you'd feel it standing at the door.
+
+As a bonus it also **populates the battery / last-status entities immediately** instead of
+leaving them `unknown` until you first press Status.
+
+To disable it (strictly on-demand — the device only ever touches the lock on an explicit
+action):
+
+```yaml
+tuya_lock:
+  - id: my_lock
+    # ...
+    status_on_boot: false     # default: true
+```
 
 ### Multiple locks
 
@@ -168,7 +271,11 @@ Note: all the locks must be in BLE range of the **one** ESP — see the placemen
 
 ### Result feedback (optional)
 
-Each `tuya_lock` fires `on_success` / `on_error` automations you can hook in HA:
+Each `tuya_lock` fires `on_success` / `on_error` automations you can hook in Home Assistant.
+Both receive a string `x` describing the result:
+- unlock/lock success → `"unlock sent"` / `"lock sent"`
+- status success → `"status: 8=70 47=1 40=0"` (the raw DP dump; battery is DP 8)
+- error → a short reason (e.g. `"lock not found (no advertisement)"`)
 
 ```yaml
 tuya_lock:
@@ -179,20 +286,31 @@ tuya_lock:
     device_id: "..."
     passcode: "..."
     on_success:
-      - logger.log: "front door action ok"
+      - logger.log:
+          format: "front door action ok: %s"
+          args: [x.c_str()]
     on_error:
-      - logger.log: "front door action FAILED"
+      - logger.log:
+          format: "front door action FAILED: %s"
+          args: [x.c_str()]
 ```
 
 ## Configuration fields
 
-| Field         | What it is                        | Required |
-|---------------|-----------------------------------|:--------:|
-| `mac_address` | The lock's BLE MAC address        | yes |
-| `local_key`   | BLE session crypto key (**v2.0**) | yes |
-| `uuid`        | Device pairing identity           | yes |
-| `device_id`   | Tuya device id                    | yes |
-| `passcode`    | The lock's numeric passcode       | yes |
+Under `tuya_lock:`:
+
+| Field           | What it is                                         | Required |
+|-----------------|----------------------------------------------------|:--------:|
+| `ble_client_id` | Links to the `ble_client:` for this lock           | yes |
+| `local_key`     | BLE session crypto key (**v2.0** — see below)      | yes |
+| `uuid`          | Device pairing identity                            | yes |
+| `device_id`     | Tuya device id                                     | yes |
+| `passcode`      | The lock's numeric passcode                        | yes |
+| `status_on_boot`| Read status shortly after boot to warm the BLE path + fill entities (default: `true`) | no |
+| `on_success` / `on_error` | Automations run when an action finishes  | no |
+
+The lock's **BLE MAC address** is not a `tuya_lock` field — it goes on the linked `ble_client:`
+block (`mac_address:`), which `ble_client_id` points to.
 
 ## Getting your credentials
 
@@ -335,10 +453,32 @@ make -C tests test
 
 See [`tests/`](tests/). CI runs them on every push.
 
-## Security note
+## Security
 
-This controls **your own lock, locally**. Treat the credentials (especially `local_key` and
-`passcode`) as secrets — keep them in ESPHome `!secret`s / a private config, never commit them.
+This device can **open your front door**, so treat it as a security-sensitive device, not a
+regular sensor.
+
+**Credentials are secrets.** The `local_key` and `passcode` are all that's needed to unlock —
+keep them in ESPHome `!secret`s / a private config and never commit them. The `passcode` is the
+lock's real door code.
+
+**Don't expose a fallback AP or config portal.** The examples deliberately omit
+`captive_portal:` and the WiFi fallback `ap:`. Here's why that matters for a lock:
+
+- With a fallback `ap:` + `captive_portal:`, an ESP that **loses WiFi** (router reboot, or an
+  attacker simply **cutting power to your router**) will bring up its **own open/soft-AP
+  Wi-Fi network** and serve a config portal. Anyone in range can then connect to it and
+  potentially reconfigure the device or point it at their own network — a physical-proximity
+  attack that needs no credentials.
+- Similarly, avoid the ESPHome **`web_server:`** component on a door controller — it's an
+  extra network-exposed control surface.
+- Leaving these out means a WiFi outage simply makes the lock **buttons unavailable** until
+  WiFi returns — the *safe* failure mode (the door just can't be operated remotely; it isn't
+  opened, and nothing new is exposed). To change WiFi, re-flash over USB.
+
+**Keep it on a trusted/IoT VLAN.** The unlock path is Home Assistant → (encrypted API) → ESP → BLE → lock.
+Protect the Home Assistant side as you would any door-unlock capability, and consider putting the ESP on a
+segregated IoT network.
 
 ## Credits
 

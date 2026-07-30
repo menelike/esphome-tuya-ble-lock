@@ -262,6 +262,31 @@ std::vector<uint8_t> build_lock_dp() {
   return {TL_DP_LOCK_ID, 0x01, 0x01, 0x01};
 }
 
+// ---- status parsing ----
+uint32_t DataPoint::as_int() const {
+  uint32_t v = 0;
+  for (uint8_t b : value)
+    v = (v << 8) | b;  // big-endian
+  return v;
+}
+
+std::vector<DataPoint> parse_datapoints(const std::vector<uint8_t> &data) {
+  std::vector<DataPoint> out;
+  size_t i = 0;
+  while (i + 3 <= data.size()) {
+    DataPoint dp;
+    dp.id = data[i];
+    dp.type = data[i + 1];
+    uint8_t len = data[i + 2];
+    if (i + 3 + len > data.size())
+      break;  // truncated — stop safely
+    dp.value.assign(data.begin() + i + 3, data.begin() + i + 3 + len);
+    out.push_back(std::move(dp));
+    i += 3 + len;
+  }
+  return out;
+}
+
 }  // namespace proto
 }  // namespace tuya_lock
 }  // namespace esphome

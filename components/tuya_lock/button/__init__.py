@@ -1,9 +1,8 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import button
-from .. import TuyaLock, tuya_lock_ns
+from .. import TuyaLock, tuya_lock_ns, CONF_TUYA_LOCK_ID
 
-CONF_TUYA_LOCK_ID = "tuya_lock_id"
 CONF_ACTION = "action"
 
 UnlockButton = tuya_lock_ns.class_("UnlockButton", button.Button)

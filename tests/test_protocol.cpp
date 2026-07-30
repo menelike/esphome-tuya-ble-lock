@@ -127,6 +127,21 @@ int main() {
     CHECK_TRUE(d.seq == 42 && d.code == CODE_DPS && d.data == data, "round-trip fields match");
   }
 
+  // --- parse_datapoints (real status DP bytes: DP8 battery, DP47 lock, DP40 door) ---
+  {
+    // [id][type][len][value]: DP8 int 00000046 (=70), DP47 bool 00, DP40 enum 02
+    auto body = unhex("08020400000046" "2f010100" "28040102");
+    auto dps = parse_datapoints(body);
+    CHECK_TRUE(dps.size() == 3, "parse_datapoints count == 3");
+    CHECK_TRUE(dps[0].id == 8 && dps[0].as_int() == 70, "DP8 battery == 70");
+    CHECK_TRUE(dps[1].id == 47 && dps[1].as_int() == 0, "DP47 lock_state == 0");
+    CHECK_TRUE(dps[2].id == 40 && dps[2].as_int() == 2, "DP40 door == 2 (closed)");
+    // truncated tail must be ignored, not overrun
+    auto trunc = unhex("08020400000046" "2f0101");  // last DP claims len 1 but value missing
+    auto dps2 = parse_datapoints(trunc);
+    CHECK_TRUE(dps2.size() == 1, "parse_datapoints stops safely on truncation");
+  }
+
   // --- reassembler safety on hostile input ---
   {
     Reassembler r;
